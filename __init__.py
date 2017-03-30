@@ -10,53 +10,7 @@ from anki.utils import ids2str, splitFields
 import re
 from collections import defaultdict
 from datetime import datetime
-
-from uniseg.codepoint import code_point
-from uniseg.wrap import tt_width, TTFormatter, wrap
-from uniseg.graphemecluster import grapheme_clusters
-
-
-def toml_gc_width(s, index=0, ambiguous_as_wide=False):
-    cp = code_point(s, index)
-    if 0 <= ord(cp) <= 0x1f:
-        return 6
-    eaw = east_asian_width(cp)
-    if eaw in ('W', 'F') or (eaw == 'A' and ambiguous_as_wide):
-        return 2
-    return 1
-
-
-def toml_logical_width(s, ambiguous_as_wide=False):
-    total_width = 0
-    for gc in grapheme_clusters(s):
-        total_width += tt_width(gc, ambiguous_as_wide)
-    return total_width
-
-
-class TOMLWrapFormatter(TTFormatter):
-    def __init__(self, wrap_width):
-        super(TOMLWrapFormatter, self).__init__(wrap_width, tab_width=1, tab_char=u'\t')
-
-    def text_extents(self, s):
-        ambiguous_as_wide = self.ambiguous_as_wide
-        widths = []
-        total_width = 0
-        for gc in grapheme_clusters(s):
-            total_width += toml_gc_width(gc, ambiguous_as_wide)
-            widths.extend(total_width for _ in gc)
-        return widths
-
-    def lines(self):
-        if not self._lines[-1]:
-            self._lines.pop()
-        return self._lines
-
-
-def toml_wrap(s, wrap_width, cur=0):
-    formatter = TOMLWrapFormatter(wrap_width)
-    wrap(formatter, s, cur=cur)
-    return formatter.lines()
-
+import textwrap
 
 class TOMLGenerator(object):
     g_newline = '\n'
@@ -70,8 +24,8 @@ class TOMLGenerator(object):
     KEY_DISALLOWED = re.compile(r"[^A-Za-z0-9_-]")
 
     def __init__(self, output):
-        self.key_width_cache = keydefaultdict(toml_logical_width)
         self.output = output
+        self.text_wrapper = textwrap.TextWrapper(width=124, expand_tabs=False, replace_whitespace=False, drop_whitespace=False)
 
     @classmethod
     def escape_string(cls, s):
@@ -88,11 +42,24 @@ class TOMLGenerator(object):
             self.ML_ESCAPE.sub(lambda c: '\\' + (ESCAPE_REPL.get(c.group(1), None)
                                                  or ('u%.4x' % ord(c.group(1)))), s))
 
+    def wrap_text(self, s, offset):
+        tw = self.text_wrapper
+        tw.initial_indent = ' ' * offset
+
+        lines = []
+        for para in s.splitlines():
+            sl = tw.wrap(para)
+            if tw.initial_indent and sl:
+                sl[0] = sl[0][offset:]
+            lines.extend(sl)
+            tw.initial_indent = ''
+        return lines
+
     def g_string(self, line_offset, v):
         output = self.output
         WS_MATCH = self.WS_MATCH
 
-        lines = toml_wrap(v, 124, cur=line_offset)
+        lines = self.wrap_text(v, line_offset)
 
         if len(lines) == 0:
             output.write('""\n')
@@ -134,6 +101,7 @@ class TOMLGenerator(object):
                     self.g_write_escaped(lines[0])
                     output.write('"\n')
 
+
     def g_bool(self, line_offset, v):
         self.output.write('true' if v else 'false')
         self.output.write('\n')
@@ -163,9 +131,8 @@ class TOMLGenerator(object):
             k = '"' + self.escape_string(k) + '" = '
         else:
             k += ' = '
-        key_width = self.key_width_cache[k]
         self.output.write(k)
-        self.gen_value(key_width, v)
+        self.gen_value(len(k), v)
 
 
 class keydefaultdict(defaultdict):
@@ -212,18 +179,21 @@ class TOMLNoteExporter(Exporter):
         cardIds = self.cardIds()
         count = 0
 
+        #        """SELECT guid, flds, mid, tags
+        # FROM notes
+        # WHERE id IN
+        #  (SELECT nid
+        #   FROM cards
+        #   WHERE cards.id IN %s)
+        # ORDER BY sfld""" % ids2str(cardIds)
         # r"""
         # SELECT guid, flds, mid, tags FROM notes
         # WHERE tags LIKE '%Brosencephalon%' ORDER BY sfld"""
         # """
 
-        for id, flds, mid, tags in self.col.db.execute("""SELECT guid, flds, mid, tags
- FROM notes
- WHERE id IN
-  (SELECT nid
-   FROM cards
-   WHERE cards.id IN %s)
- ORDER BY sfld""" % ids2str(cardIds)):
+        for id, flds, mid, tags in self.col.db.execute(r"""
+SELECT guid, flds, mid, tags FROM notes
+         WHERE tags LIKE '%Brosencephalon%' ORDER BY sfld"""):
             fieldData = splitFields(flds)
             om = outputModels[mid]
             output.write('[[note]]\n')
