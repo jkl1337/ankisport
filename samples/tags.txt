@@ -1,0 +1,15 @@
+Biochemistry
+Cardiovascular
+Endocrine
+Gastrointestinal
+Hematology-Oncology
+Immunology
+MSK-Skin-CT
+Microbiology
+Neurology
+Pathology
+Pharmacology
+Psychiatry
+Renal
+Reproductive
+Respiratory
