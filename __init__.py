@@ -1,27 +1,28 @@
 # coding=utf-8
 import codecs
+import re
+import textwrap
+from collections import defaultdict
+from datetime import datetime
 from itertools import islice
-from unicodedata import east_asian_width
 
+from PyQt4 import QtCore, QtGui
 from anki.exporting import Exporter
 from anki.hooks import addHook
 from anki.lang import _
-from anki.utils import ids2str, splitFields
-import re
-from collections import defaultdict
-from datetime import datetime
-import textwrap
+from anki.utils import splitFields
+from aqt import mw
+from aqt.qt import *
+
 
 class TOMLGenerator(object):
     g_newline = '\n'
 
     DATETIME_ISO8601_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
-    ESCAPE_RE = re.compile(r'([\x00-\x1f"\\])')
-    ESCAPE_REPL = {'\t': 't', '\n': 'n', '\"': '"', '\r': 'r', '\\': '\\', '\f': 'f', '\b': 'b', '"""': r'"""'}
-    ML_ESCAPE = re.compile(r'([\x00-\x09\x0b-\x1f\\]|""")')
-    WS_MATCH = re.compile(r'^[\t ]+')
-    SQ_DISALLOWED = re.compile(r"[\x00-\x1f']")
-    KEY_DISALLOWED = re.compile(r"[^A-Za-z0-9_-]")
+    escape_re = re.compile(r'([\x00-\x1f"\\])')
+    escape_re_sub_tab = {'\t': 't', '\n': 'n', '\"': '"', '\r': 'r', '\\': '\\', '\f': 'f', '\b': 'b', '"""': r'"""'}
+    ml_escape_re = re.compile(r'([\x00-\x09\x0b-\x1f\\]|""")')
+    ws_match_re = re.compile(r'^[\t ]+')
 
     def __init__(self, output):
         self.output = output
@@ -29,18 +30,18 @@ class TOMLGenerator(object):
 
     @classmethod
     def escape_string(cls, s):
-        ESCAPE_REPL = cls.ESCAPE_REPL
-        return cls.ESCAPE_RE.sub(lambda c: '\\' + (ESCAPE_REPL.get(c.group(1), None)
+        escape_re_sub_tab = cls.escape_re_sub_tab
+        return cls.escape_re.sub(lambda c: '\\' + (escape_re_sub_tab.get(c.group(1), None)
                                                    or ('u%.4x' % ord(c.group(1)))), s)
 
     def g_write_escaped(self, s):
         self.output.write(self.escape_string(s))
 
     def g_write_ml_escaped(self, s):
-        ESCAPE_REPL = self.ESCAPE_REPL
+        escape_re_sub_tab = self.escape_re_sub_tab
         self.output.write(
-            self.ML_ESCAPE.sub(lambda c: '\\' + (ESCAPE_REPL.get(c.group(1), None)
-                                                 or ('u%.4x' % ord(c.group(1)))), s))
+            self.ml_escape_re.sub(lambda c: '\\' + (escape_re_sub_tab.get(c.group(1), None)
+                                                    or ('u%.4x' % ord(c.group(1)))), s))
 
     def wrap_text(self, s, offset):
         tw = self.text_wrapper
@@ -57,7 +58,7 @@ class TOMLGenerator(object):
 
     def g_string(self, line_offset, v):
         output = self.output
-        WS_MATCH = self.WS_MATCH
+        ws_match = self.ws_match_re
 
         lines = self.wrap_text(v, line_offset)
 
@@ -66,7 +67,7 @@ class TOMLGenerator(object):
             return
         elif len(lines) == 1:
             multiline = False
-            singlequote = False if self.SQ_DISALLOWED.search(lines[0]) else True
+            singlequote = False if re.search(r"[\x00-\x1f']", lines[0]) else True
             if not singlequote:
                 unescaped_style = lines[0].find("'''") == -1
         else:
@@ -77,9 +78,10 @@ class TOMLGenerator(object):
             self.g_write_ml_escaped(lines[0])
             trailing_nl = lines[0][-1] == u'\n'
             trailing_quote = False
+            # TODO: Handle massive whitespace
             for line in islice(lines, 1, None):
                 # fix up previous line, appending any leading whitespace on this line
-                lws = WS_MATCH.match(line)
+                lws = ws_match.match(line)
                 if lws:
                     ws = lws.group()
                     trailing_nl = ws[-1] == u'\n'
@@ -116,9 +118,6 @@ class TOMLGenerator(object):
         self.output.write(v.strftime(self.DATETIME_ISO8601_FORMAT))
         self.output.write('\n')
 
-    # def g_array(self, line_offset, v):
-    #    return '[' + ', '.join(self.gen_value(i) for i in v) + ']'
-
     VALUE_MAP = {unicode: g_string, bool: g_bool, int: g_integer, long: g_integer, float: g_float, datetime: g_datetime}
 
     def gen_value(self, line_offset, v):
@@ -127,7 +126,7 @@ class TOMLGenerator(object):
                 return c(self, line_offset, v)
 
     def gen_key_value(self, k, v):
-        if self.KEY_DISALLOWED.search(k):
+        if re.search(r"[^A-Za-z0-9_-]", k):
             k = '"' + self.escape_string(k) + '" = '
         else:
             k += ' = '
@@ -218,3 +217,63 @@ def update_exporters_list(exps):
 
 
 addHook("exportersList", update_exporters_list)
+
+
+try:
+    _fromUtf8 = QtCore.QString.fromUtf8
+except AttributeError:
+    def _fromUtf8(s):
+        return s
+
+try:
+    _encoding = QtGui.QApplication.UnicodeUTF8
+    def _translate(context, text, disambig):
+        return QtGui.QApplication.translate(context, text, disambig, _encoding)
+except AttributeError:
+    def _translate(context, text, disambig):
+        return QtGui.QApplication.translate(context, text, disambig)
+
+class Ui_tomlExportDialog(object):
+    def setupUi(self, d):
+        d.setObjectName(_fromUtf8("tomlExportDlg"))
+        d.setWindowModality(QtCore.Qt.ApplicationModal)
+        d.resize(718, 358)
+        d.setSizeGripEnabled(True)
+        d.setModal(True)
+        self.verticalLayout = QtGui.QVBoxLayout(d)
+
+        grid = QtGui.QGridLayout()
+
+        self.fileEdit = QtGui.QLineEdit(d)
+        self.buttonBox = QtGui.QDialogButtonBox(d)
+        self.buttonBox.setOrientation(QtCore.Qt.Horizontal)
+        self.buttonBox.setStandardButtons(QtGui.QDialogButtonBox.Cancel|QtGui.QDialogButtonBox.Ok)
+        self.buttonBox.setObjectName(_fromUtf8("buttonBox"))
+        self.verticalLayout.addWidget(self.buttonBox)
+        #self.buttonBox.accepted = d.accept
+        #self.buttonBox.rejected = d.reject
+        QtCore.QObject.connect(self.buttonBox, QtCore.SIGNAL(_fromUtf8("accepted()")), d.accept)
+        QtCore.QObject.connect(self.buttonBox, QtCore.SIGNAL(_fromUtf8("rejected()")), d.reject)
+        QtCore.QMetaObject.connectSlotsByName(d)
+
+class ExportTOMLDialog(QDialog):
+
+    def __init__(self, mw):
+        QDialog.__init__(self, mw, Qt.Window)
+        self.mw = mw
+        self.ui = Ui_tomlExportDialog()
+        self.ui.setupUi(self)
+        self.setup()
+
+    def setup(self):
+        pass
+
+
+def displayDialog():
+    dlg = ExportTOMLDialog(mw)
+    dlg.exec_()
+
+action = QAction('TOML Export...', mw)
+action.triggered.connect(displayDialog)
+mw.form.menuTools.addAction(action)
+#mw.ExportToml = ExportSettings()
