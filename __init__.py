@@ -1,19 +1,21 @@
 # coding=utf-8
-import codecs
-import re
+import json
+import subprocess
 import textwrap
 from collections import defaultdict
 from datetime import datetime
 from itertools import islice, izip
 
+import codecs
+import re
 from PyQt4 import QtCore, QtGui
 from anki.exporting import Exporter
-from anki.hooks import addHook
 from anki.lang import _
 from anki.utils import splitFields, ids2str
 from aqt import mw
 from aqt.qt import *
-from aqt.utils import showWarning
+from aqt.utils import showWarning, tooltip
+
 import pytoml as toml
 
 class TOMLGenerator(object):
@@ -27,7 +29,7 @@ class TOMLGenerator(object):
 
     def __init__(self, output):
         self.output = output
-        self.text_wrapper = textwrap.TextWrapper(width=124, expand_tabs=False, replace_whitespace=False, drop_whitespace=False)
+        self.text_wrapper = textwrap.TextWrapper(width=120, expand_tabs=False, replace_whitespace=False, drop_whitespace=False)
 
     @classmethod
     def escape_string(cls, s):
@@ -49,7 +51,7 @@ class TOMLGenerator(object):
         tw.initial_indent = ' ' * offset
 
         lines = []
-        for para in s.splitlines():
+        for para in s.splitlines(True):
             sl = tw.wrap(para)
             if tw.initial_indent and sl:
                 sl[0] = sl[0][offset:]
@@ -61,7 +63,7 @@ class TOMLGenerator(object):
         output = self.output
         ws_match = self.ws_match_re
 
-        lines = self.wrap_text(v, line_offset)
+        lines = self.wrap_text(v, 0)
 
         if len(lines) == 0:
             output.write('""\n')
@@ -88,11 +90,12 @@ class TOMLGenerator(object):
                     trailing_nl = ws[-1] == u'\n'
                     self.g_write_ml_escaped(ws)
                     line = line[lws.end():]
-                output.write('\n' if trailing_nl else '\\\n')
+                if not trailing_nl:
+                    output.write('\\\n')
                 self.g_write_ml_escaped(line)
                 trailing_nl = line[-1] == u'\n'
                 trailing_quote = line[-1] == u'"'
-            output.write('"""\n' if not trailing_quote else '\\n"""\n')
+            output.write('"""\n' if not trailing_quote else '\\\n"""\n')
         else:
             if singlequote:
                 output.write("'%s'\n" % lines[0])
@@ -156,6 +159,7 @@ class OutputModel(object):
 
         self.fieldNames = [transformName(fn) for fn in fieldNames]
         self.name = model['name']
+        self.model = model
 
 
 class TOMLNoteExporter(Exporter):
@@ -173,7 +177,7 @@ class TOMLNoteExporter(Exporter):
         self.doExport(file)
         file.close()
 
-    def doExport(self, path):
+    def doExport(self, path, verify=False):
         models = self.col.models
         outputModels = keydefaultdict(lambda mid: OutputModel(models, mid))
 
@@ -182,9 +186,13 @@ class TOMLNoteExporter(Exporter):
         notes = []
         query = self.query
         if query is not None:
-            sets = self.sets if self.sets else ['']
-            for s in sets:
-                notes.append(self.col.findNotes(query + ' (tag:%s or tag:%s::*)' % (s, s)))
+            if self.sets:
+                sets = self.sets
+                for s in sets:
+                    notes.append(self.col.findNotes('(%s) (tag:%s or tag:%s::*)' % (query, s, s)))
+            else:
+                sets = ['']
+                notes.append(self.col.findNotes('%s' % query))
         else:
             cardIds = self.cardIds()
             cursor = self.col.db.execute(r"""
@@ -196,10 +204,15 @@ WHERE id IN
    WHERE cards.id IN %s)
 ORDER BY sfld""" % ids2str(cardIds))
 
+        paths = []
         for note_ids, group_name in izip(notes, sets):
-            cur_path, ext = os.path.splitext(path)
-            cur_path = '%s-%s%s' % (cur_path, group_name, ext)
+            if group_name:
+                cur_path, ext = os.path.splitext(path)
+                cur_path = '%s-%s%s' % (cur_path, group_name, ext)
+            else:
+                cur_path = path
             with codecs.open(cur_path, 'w', encoding='utf-8') as output:
+                paths.append(cur_path)
                 generator = TOMLGenerator(output)
 
                 for id, flds, mid, tags in self.col.db.execute(r"""
@@ -208,19 +221,64 @@ WHERE id IN %s
 ORDER BY sfld""" % ids2str(note_ids)):
                     fieldData = splitFields(flds)
                     om = outputModels[mid]
-                    output.write('[[note]]\n')
+                    output.write('[[notes]]\n')
                     output.write("model = '%s'\n" % om.name)
+                    output.write("guid = '%s'\n" % id)
                     for i, name in enumerate(om.fieldNames):
                         f = fieldData[i]
                         if name == u'note-id':
                             f = int(f)
                         generator.gen_key_value(name, f)
-                    generator.gen_key_value(u'tags', tags.strip().decode('utf-8'))
+                    tags = self._fixup_tags(tags)
+                    generator.gen_key_value(u'tags', tags)
                     output.write('\n')
                     count += 1
 
+        mode = 'a' if len(sets) == 1 else 'w'
+        filteredModels = []
+        for v in outputModels.itervalues():
+            n = v.model.copy()
+            n['tags'] = []
+            filteredModels.append(n)
+
+        with codecs.open(path, mode, encoding='utf-8') as output:
+            data = {'models': filteredModels}
+            toml.dump(output, data)
+
+        if verify:
+            self.verify(paths)
         self.count = count
         return True
+
+    re_tag_fixup = re.compile(r'(?:marked)(\s+|\Z)')
+
+    @classmethod
+    def _fixup_tags(cls, tags):
+        tags = cls.re_tag_fixup.sub('', tags)
+        return tags.strip()
+
+    def verify(self, paths):
+        p1 = subprocess.Popen(['cat'] + paths, stdout=subprocess.PIPE)
+        p2 = subprocess.Popen(['tomljson'], stdin=p1.stdout, stdout=subprocess.PIPE)
+        p1.stdout.close()
+        exp_data = json.loads(p2.communicate()[0])
+        notes = exp_data['notes']
+        note_tbl = {}
+        for n in notes:
+            note_tbl[n['note-id']] = n
+
+        for flds, in self.col.db.execute(r"""
+SELECT flds FROM notes
+WHERE id IN %s""" % ids2str(note_tbl.keys())):
+            flds = splitFields(flds)
+            nid = flds[0]
+            want = flds[1]
+            n = note_tbl[int(nid)]
+            if want != n['text']:
+                showWarning('Mismatch text %s\n\nWant %s\n\nGot %s' % (nid, repr(want), repr(n['text'])))
+            want = flds[2]
+            if want != n['extra']:
+                showWarning('Mismatch extra %s\n\nWant %s\n\nGot %s' % (nid, repr(want), repr(n['extra'])))
 
 
 # def update_exporters_list(exps):
@@ -254,7 +312,9 @@ class ExportDialog(QDialog):
         ok = self.readValues()
         if ok:
             exporter = TOMLNoteExporter(mw.col, query=mw.ankisport.query, sets=mw.ankisport.sets)
-            ok = exporter.doExport(mw.ankisport.output_path)
+            ok = exporter.doExport(mw.ankisport.output_path, verify=mw.ankisport.verify)
+            if ok:
+                tooltip("Exported %d notes" % exporter.count, parent=self.mw)
         if ok:
             QDialog.accept(self)
 
@@ -274,6 +334,7 @@ class ExportDialog(QDialog):
     def fillValues(self):
         self.profile_edit.setText(mw.ankisport.profile_path)
         self.output_edit.setText(mw.ankisport.output_path)
+        self.verify_btn.setChecked(mw.ankisport.verify)
 
     def readValues(self):
         mw.ankisport.profile_path = self.profile_edit.text()
@@ -285,11 +346,12 @@ class ExportDialog(QDialog):
             showWarning("The export path is not set")
             return False
 
+        mw.ankisport.verify = self.verify_btn.isChecked()
+
         with open(mw.ankisport.profile_path, 'r') as f:
             t = toml.load(f)
         mw.ankisport.query = t['query']
-        mw.ankisport.sets = t['sets']
-
+        mw.ankisport.sets = t.get('sets', [])
         return True
 
     def setupUi(self):
@@ -315,6 +377,9 @@ class ExportDialog(QDialog):
         output_btn = QPushButton("Open &Output", clicked=self.openOutput)
         grid.addWidget(output_btn, 1, 4, 1, 1)
 
+        self.verify_btn = QCheckBox('&Verify')
+        grid.addWidget(self.verify_btn, 2, 0, 1, 2)
+
         l_main.addLayout(grid)
         button_box = QDialogButtonBox(self)
         button_box.setOrientation(QtCore.Qt.Horizontal)
@@ -331,6 +396,7 @@ class Settings(object):
         self.output_path = os.path.join(dir, "export.toml")
         self.query = ""
         self.sets = []
+        self.verify = False
 
 def displayDialog():
     dlg = ExportDialog(mw)
