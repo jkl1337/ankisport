@@ -170,7 +170,7 @@ class TOMLNoteExporter(Exporter):
     key = _("Notes in TOML format")
     ext = ".toml"
 
-    def __init__(self, col, query=None, sets=None):
+    def __init__(self, col, query=None, sets=None, set_name=''):
         """
         Create a TOML Note Exporter.
         
@@ -181,6 +181,7 @@ class TOMLNoteExporter(Exporter):
         Exporter.__init__(self, col)
         self.query = query
         self.sets = sets
+        self.set_name = set_name
 
     def exportInto(self, path):
         file = codecs.open(path, "w", encoding='utf-8')
@@ -192,24 +193,23 @@ class TOMLNoteExporter(Exporter):
         output_models = keydefaultdict(lambda mid: OutputModel(models, mid))
 
         count = 0
-        notes = []
+        grouped_notes = []
+        sets = None
         if self.query is not None:
             if self.sets:
                 sets = self.sets
-                for s in sets:
-                    notes.append(self.col.findNotes('(%s) (tag:"%s" or tag:"%s"::*)' % (self.query, s, s)))
+                for group_name, expr in sets.items():
+                    grouped_notes.append((group_name, self.col.findNotes('(%s) (%s)' % (self.query, expr))))
             else:
-                sets = ['']
-                notes.append(self.col.findNotes('%s' % self.query))
+                grouped_notes.append(('', self.col.findNotes('%s' % self.query)))
         else:
-            sets = ['']
-            notes.append(self.cardIds())
+            grouped_notes.append(('', self.cardIds()))
 
         paths = []
-        for note_ids, group_name in izip(notes, sets):
+        for group_name, note_ids in grouped_notes:
             if group_name:
-                cur_path, ext = os.path.splitext(path)
-                cur_path = '%s-%s%s' % (cur_path, group_name, ext)
+                dirname, _ = os.path.split(path)
+                cur_path = os.path.join(dirname, group_name + '.toml')
             else:
                 cur_path = path
             with codecs.open(cur_path, 'w', encoding='utf-8') as output:
@@ -235,9 +235,9 @@ ORDER BY sfld""" % ids2str(note_ids)):
                     output.write('\n')
                     count += 1
 
-        mode = 'a' if len(sets) == 1 else 'w'
+        mode = 'a' if not sets else 'w'
         filtered_models = []
-        for v in output_models.itervalues():
+        for v in output_models.values():
             n = v.model.copy()
             # not sure the importance of this value and it leaks unwanted data
             n['tags'] = []
