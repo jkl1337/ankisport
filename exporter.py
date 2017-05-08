@@ -228,7 +228,10 @@ ORDER BY sfld""" % ids2str(note_ids)):
                     for i, name in enumerate(cur_model.field_names):
                         f = field_data[i]
                         if name == u'note-id':
-                            f = int(f)
+                            try:
+                                f = int(f)
+                            except ValueError:
+                                pass
                         generator.write_key_value(name, f)
                     tags = self.fixup_tags(tags)
                     generator.write_key_value(u'tags', tags)
@@ -241,6 +244,7 @@ ORDER BY sfld""" % ids2str(note_ids)):
             n = v.model.copy()
             # not sure the importance of this value and it leaks unwanted data
             n['tags'] = []
+            n.pop('req', None)
             filtered_models.append(n)
 
         with codecs.open(path, mode, encoding='utf-8') as output:
